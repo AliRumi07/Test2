@@ -1,7 +1,8 @@
-from datetime import datetime, timedelta
 import asyncio
 import websockets
 import json
+from datetime import datetime
+from collections import deque
 from flask import Flask, render_template_string
 from threading import Thread
 import time
@@ -13,9 +14,8 @@ portfolio_balance = 1000
 trade_amount = 100
 leverage_x = 10
 fee_rate = 0.001
-risk_reward_ratio = 1.5
 
-# Add the Pair variable
+# Pairs to trade
 Pairs = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "TONUSDT", "ADAUSDT", "TRXUSDT", "AVAXUSDT"
 ]
@@ -35,9 +35,8 @@ class TradingStrategy:
         self.total_profit_loss = 0
         self.max_drawdown = 0
         self.lowest_balance = portfolio_balance
-        self.candle_15m = {pair: None for pair in pairs}
-        self.candle_5m = {pair: None for pair in pairs}
-        self.last_15m_close_time = {pair: None for pair in pairs}
+        self.candle_data_15m = {pair: None for pair in pairs}  # Store last 15m candle
+        self.candle_data_5m = {pair: deque(maxlen=3) for pair in pairs}  # Store last 3 5m candles
 
         self.pair_stats = {pair: {
             'Price': 0,
@@ -74,77 +73,72 @@ class TradingStrategy:
             self.pair_stats[pair]['Current P/L'] = 0
 
         if timeframe == Timeframe_15m:
-            self.candle_15m[pair] = {
-                'open': open_price,
-                'high': high_price,
-                'low': low_price,
-                'close': close_price,
-                'timestamp': timestamp
-            }
             if is_closed:
-                self.last_15m_close_time[pair] = timestamp
+                self.candle_data_15m[pair] = {
+                    'open': open_price,
+                    'high': high_price,
+                    'low': low_price,
+                    'close': close_price
+                }
+                # Reset 5m candle data when a new 15m candle starts
+                self.candle_data_5m[pair].clear()
         elif timeframe == Timeframe_5m:
-            self.candle_5m[pair] = {
+            self.candle_data_5m[pair].append({
                 'open': open_price,
                 'high': high_price,
                 'low': low_price,
-                'close': close_price,
-                'timestamp': timestamp
-            }
+                'close': close_price
+            })
 
-        if self.candle_15m[pair] and self.candle_5m[pair] and self.last_15m_close_time[pair]:
-            self.check_entry_conditions(pair)
+            if is_closed and self.candle_data_15m[pair] is not None:
+                self.check_entry_conditions(pair)
 
         if self.positions[pair] is not None:
-            self.check_exit_conditions(pair, close_price)
+            self.check_exit_conditions(pair, timestamp, high_price, low_price)
 
     def check_entry_conditions(self, pair):
-        if self.positions[pair] is not None:
-            return
+        if len(self.candle_data_5m[pair]) == 1:  # First 5m candle after 15m candle close
+            candle_15m = self.candle_data_15m[pair]
+            candle_5m = self.candle_data_5m[pair][0]
 
-        candle_15m = self.candle_15m[pair]
-        candle_5m = self.candle_5m[pair]
-
-        # Check if it's the first 5m candle after 15m candle close
-        if candle_5m['timestamp'] - self.last_15m_close_time[pair] <= timedelta(minutes=5):
-            # Long condition
             if candle_5m['close'] > candle_15m['high']:
-                self.open_long_position(pair, candle_5m['close'], candle_15m['low'])
-            # Short condition
+                self.open_long_position(pair, datetime.now(), candle_5m['close'], candle_15m['low'])
             elif candle_5m['close'] < candle_15m['low']:
-                self.open_short_position(pair, candle_5m['close'], candle_15m['high'])
+                self.open_short_position(pair, datetime.now(), candle_5m['close'], candle_15m['high'])
 
-    def open_long_position(self, pair, price, stop_loss_price):
-        self.positions[pair] = "Long"
-        self.entry_prices[pair] = price
-        self.stop_loss_prices[pair] = stop_loss_price
-        risk = price - stop_loss_price
-        self.take_profit_prices[pair] = price + (risk * risk_reward_ratio)
-        self.pair_stats[pair]['Longs'] += 1
-        self.update_stats(pair, price)
+    def open_long_position(self, pair, timestamp, price, stop_loss_price):
+        if self.positions[pair] is None:
+            self.positions[pair] = "Long"
+            self.entry_prices[pair] = price
+            self.stop_loss_prices[pair] = stop_loss_price
+            risk = price - stop_loss_price
+            self.take_profit_prices[pair] = price + (risk * 1.5)
+            self.pair_stats[pair]['Longs'] += 1
+            self.update_stats(pair, price)
 
-    def open_short_position(self, pair, price, stop_loss_price):
-        self.positions[pair] = "Short"
-        self.entry_prices[pair] = price
-        self.stop_loss_prices[pair] = stop_loss_price
-        risk = stop_loss_price - price
-        self.take_profit_prices[pair] = price - (risk * risk_reward_ratio)
-        self.pair_stats[pair]['Shorts'] += 1
-        self.update_stats(pair, price)
+    def open_short_position(self, pair, timestamp, price, stop_loss_price):
+        if self.positions[pair] is None:
+            self.positions[pair] = "Short"
+            self.entry_prices[pair] = price
+            self.stop_loss_prices[pair] = stop_loss_price
+            risk = stop_loss_price - price
+            self.take_profit_prices[pair] = price - (risk * 1.5)
+            self.pair_stats[pair]['Shorts'] += 1
+            self.update_stats(pair, price)
 
-    def check_exit_conditions(self, pair, current_price):
+    def check_exit_conditions(self, pair, timestamp, high_price, low_price):
         if self.positions[pair] == "Long":
-            if current_price >= self.take_profit_prices[pair]:
-                self.close_position(pair, self.take_profit_prices[pair], True)
-            elif current_price <= self.stop_loss_prices[pair]:
-                self.close_position(pair, self.stop_loss_prices[pair], False)
+            if high_price >= self.take_profit_prices[pair]:
+                self.close_position(pair, timestamp, self.take_profit_prices[pair], True)
+            elif low_price <= self.stop_loss_prices[pair]:
+                self.close_position(pair, timestamp, self.stop_loss_prices[pair], False)
         elif self.positions[pair] == "Short":
-            if current_price <= self.take_profit_prices[pair]:
-                self.close_position(pair, self.take_profit_prices[pair], True)
-            elif current_price >= self.stop_loss_prices[pair]:
-                self.close_position(pair, self.stop_loss_prices[pair], False)
+            if low_price <= self.take_profit_prices[pair]:
+                self.close_position(pair, timestamp, self.take_profit_prices[pair], True)
+            elif high_price >= self.stop_loss_prices[pair]:
+                self.close_position(pair, timestamp, self.stop_loss_prices[pair], False)
 
-    def close_position(self, pair, exit_price, is_profit):
+    def close_position(self, pair, timestamp, exit_price, is_profit):
         self.total_trades += 1
 
         if is_profit:
@@ -190,84 +184,85 @@ strategy = TradingStrategy(Pairs)
 
 @app.route('/')
 def index():
-    template = '''
+    return render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading Strategy Stats</title>
+        <title>Trading Bot Dashboard</title>
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
         <style>
-            table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
-            th, td { border: 1px solid black; padding: 8px; text-align: left; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+            .container { display: flex; flex-wrap: wrap; }
+            .chart { width: 100%; height: 400px; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
             th { background-color: #f2f2f2; }
-            .positive { color: green; }
-            .negative { color: red; }
         </style>
-        <script>
-            function refreshPage() {
-                location.reload();
-            }
-            setInterval(refreshPage, 1000);
-        </script>
     </head>
     <body>
-        <h1>Pair Stats</h1>
-        <table>
-            <tr>
-                <th>Pair</th>
-                <th>Price</th>
-                <th>Position</th>
-                <th>Longs</th>
-                <th>Shorts</th>
-                <th>In Profit</th>
-                <th>In Loss</th>
-                <th>Total P/L</th>
-                <th>Current P/L</th>
-            </tr>
-            {% for pair, stats in pair_stats.items() %}
-            <tr>
-                <td>{{ pair }}</td>
-                <td>${{ "%.2f"|format(stats['Price']) }}</td>
-                <td>{{ stats['Position'] }}</td>
-                <td>{{ stats['Longs'] }}</td>
-                <td>{{ stats['Shorts'] }}</td>
-                <td>{{ stats['In Profit'] }}</td>
-                <td>{{ stats['In Loss'] }}</td>
-                <td>${{ "%.2f"|format(stats['Total P/L']) }}</td>
-                <td class="{{ 'positive' if stats['Current P/L'] > 0 else 'negative' if stats['Current P/L'] < 0 else '' }}">
-                    ${{ "%.2f"|format(stats['Current P/L']) }}
-                </td>
-            </tr>
-            {% endfor %}
-        </table>
+        <h1>Trading Bot Dashboard</h1>
+        <div id="overallStats"></div>
+        <div class="container">
+            <div id="pnlChart" class="chart"></div>
+            <div id="balanceChart" class="chart"></div>
+        </div>
+        <div id="pairStats"></div>
 
-        <h1>Overall Stats</h1>
-        <table>
-            <tr>
-                <th>Metric</th>
-                <th>Value</th>
-            </tr>
-            {% for metric, value in overall_stats.items() %}
-            <tr>
-                <td>{{ metric }}</td>
-                <td>
-                    {% if metric in ['Total P/L', 'Portfolio Balance'] %}
-                        ${{ "%.2f"|format(value) }}
-                    {% elif metric in ['Accuracy', 'Max Drawdown'] %}
-                        {{ "%.2f"|format(value) }}%
-                    {% else %}
-                        {{ value }}
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </table>
+        <script>
+            function updateStats() {
+                $.getJSON('/stats', function(data) {
+                    $('#overallStats').html('<h2>Overall Stats</h2><table>' + 
+                        Object.entries(data.overall_stats).map(([key, value]) => 
+                            `<tr><th>${key}</th><td>${typeof value === 'number' ? value.toFixed(2) : value}</td></tr>`
+                        ).join('') + '</table>');
+
+                    $('#pairStats').html('<h2>Pair Stats</h2>' + 
+                        Object.entries(data.pair_stats).map(([pair, stats]) => 
+                            '<h3>' + pair + '</h3><table>' + 
+                            Object.entries(stats).map(([key, value]) => 
+                                `<tr><th>${key}</th><td>${typeof value === 'number' ? value.toFixed(2) : value}</td></tr>`
+                            ).join('') + '</table>'
+                        ).join(''));
+
+                    Plotly.newPlot('pnlChart', [{
+                        y: [data.overall_stats['Total P/L']],
+                        type: 'line',
+                        name: 'Total P/L'
+                    }], {
+                        title: 'Total Profit/Loss',
+                        yaxis: { title: 'P/L' }
+                    });
+
+                    Plotly.newPlot('balanceChart', [{
+                        y: [data.overall_stats['Portfolio Balance']],
+                        type: 'line',
+                        name: 'Portfolio Balance'
+                    }], {
+                        title: 'Portfolio Balance',
+                        yaxis: { title: 'Balance' }
+                    });
+                });
+            }
+
+            setInterval(updateStats, 1000);
+        </script>
     </body>
     </html>
-    '''
-    return render_template_string(template, pair_stats=strategy.pair_stats, overall_stats=strategy.overall_stats)
+    ''')
+
+@app.route('/stats')
+def stats():
+    return {
+        'overall_stats': strategy.overall_stats,
+        'pair_stats': strategy.pair_stats
+    }
+
+def run_flask():
+    app.run(debug=False, use_reloader=False)
 
 async def connect_to_binance_futures():
-    uri = f"wss://fstream.binance.com/stream?streams={'/'.join([pair.lower() + '@kline_' + Timeframe_15m + '/' + pair.lower() + '@kline_' + Timeframe_5m for pair in Pairs])}"
+    uri = f"wss://fstream.binance.com/stream?streams={'/'.join([f'{pair.lower()}@kline_{Timeframe_15m}/{pair.lower()}@kline_{Timeframe_5m}' for pair in Pairs])}"
 
     async with websockets.connect(uri) as websocket:
         print("Connected to Binance Futures WebSocket")
@@ -301,7 +296,7 @@ async def connect_to_binance_futures():
 
 def process_message(message):
     stream = message['stream']
-    pair = stream.split('@')[0].upper()
+    pair, timeframe = stream.split('@')[0].upper(), stream.split('_')[1]
     data = message['data']
     candle = data['k']
 
@@ -313,14 +308,11 @@ def process_message(message):
     volume = float(candle['v'])
     is_closed = candle['x']
 
-    timeframe = Timeframe_15m if 'kline_15m' in stream else Timeframe_5m
-
     strategy.process_price(pair, open_time, open_price, high_price, low_price, close_price, volume, is_closed, timeframe)
 
-def run_flask():
-    app.run(host='0.0.0.0', port=8080)
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
+
     asyncio.get_event_loop().run_until_complete(connect_to_binance_futures())
+                                

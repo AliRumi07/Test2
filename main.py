@@ -10,8 +10,18 @@ html_template = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <meta http-equiv="refresh" content="300">
     <title>Auto Refresh Page</title>
+    <script type="text/javascript">
+        // Function to refresh the page after 10 seconds
+        function startRefresh() {
+            setTimeout(function() {
+                location.reload();
+            }, 60000); // 60000 milliseconds = 1 minute
+        }
+
+        // Start the refresh after 10 seconds
+        setTimeout(startRefresh, 10000); // 10000 milliseconds = 10 seconds
+    </script>
 </head>
 <body>
     <script type="text/javascript">

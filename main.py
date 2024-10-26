@@ -5,10 +5,7 @@ import webbrowser
 
 app = Flask(__name__)
 
-# URL to open and refresh
-url_to_open = "https://www.profitablecpmrate.com/zjywtxpi?key=c2a6b1eca784188993e7fb397787d80b"
-
-# HTML template with auto-refresh meta tag
+# HTML template with auto-refresh meta tag and JavaScript code
 html_template = '''
 <!DOCTYPE html>
 <html>
@@ -17,14 +14,23 @@ html_template = '''
     <title>Auto Refresh Page</title>
 </head>
 <body>
-    <iframe src="{{ url }}" width="100%" height="100%"></iframe>
+    <script type="text/javascript">
+        atOptions = {
+            'key' : 'b67bc9dfe217891d4f52e22e6d0b0b71',
+            'format' : 'iframe',
+            'height' : 60,
+            'width' : 468,
+            'params' : {}
+        };
+    </script>
+    <script type="text/javascript" src="//www.highperformanceformat.com/b67bc9dfe217891d4f52e22e6d0b0b71/invoke.js"></script>
 </body>
 </html>
 '''
 
 @app.route('/')
 def index():
-    return render_template_string(html_template, url=url_to_open)
+    return render_template_string(html_template)
 
 def open_browser():
     # Wait a moment to ensure the server is up
